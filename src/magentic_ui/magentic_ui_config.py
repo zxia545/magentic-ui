@@ -1,3 +1,4 @@
+import os
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from autogen_core import ComponentModel
@@ -36,28 +37,63 @@ class ModelClientConfigs(BaseModel):
     file_surfer: Optional[Union[ComponentModel, Dict[str, Any]]] = None
     action_guard: Optional[Union[ComponentModel, Dict[str, Any]]] = None
 
+    # NOTE: Defaults must be compatible with autogen-ext's OpenAI model registry.
+    # Many environments (especially OpenAI-compatible proxies) will still work with
+    # arbitrary model names, but autogen-ext requires `model_info` for unknown models.
     default_client_config: ClassVar[Dict[str, Any]] = {
         "provider": "OpenAIChatCompletionClient",
         "config": {
-            "model": "gpt-4.1-2025-04-14",
+            "model": "gpt-4o-mini",
         },
         "max_retries": 10,
     }
     default_action_guard_config: ClassVar[Dict[str, Any]] = {
         "provider": "OpenAIChatCompletionClient",
         "config": {
-            "model": "gpt-4.1-nano-2025-04-14",
+            # Prefer the same default as the main client so action-guard doesn't
+            # accidentally select a model unavailable on a proxy account.
+            "model": "gpt-4o-mini",
         },
         "max_retries": 10,
     }
 
     @classmethod
     def get_default_client_config(cls) -> Dict[str, Any]:
-        return cls.default_client_config
+        config = dict(cls.default_client_config)
+        inner = dict(config.get("config", {}))
+
+        # Allow simple env-based overrides for quick local runs.
+        env_model = os.environ.get("OPENAI_MODEL")
+        if env_model:
+            inner["model"] = env_model
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            inner["api_key"] = env_key
+        env_base_url = os.environ.get("OPENAI_BASE_URL")
+        if env_base_url:
+            inner["base_url"] = env_base_url
+
+        config["config"] = inner
+        return config
 
     @classmethod
     def get_default_action_guard_config(cls) -> Dict[str, Any]:
-        return cls.default_action_guard_config
+        # Reuse the same env overrides as the primary client.
+        config = dict(cls.default_action_guard_config)
+        inner = dict(config.get("config", {}))
+
+        env_model = os.environ.get("OPENAI_MODEL")
+        if env_model:
+            inner["model"] = env_model
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            inner["api_key"] = env_key
+        env_base_url = os.environ.get("OPENAI_BASE_URL")
+        if env_base_url:
+            inner["base_url"] = env_base_url
+
+        config["config"] = inner
+        return config
 
 
 class MagenticUIConfig(BaseModel):

@@ -1,10 +1,11 @@
 # /api/plans routes
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+import json
 import os
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 from pydantic import BaseModel
 
 from autogen_agentchat.messages import TextMessage, MultiModalMessage
@@ -18,6 +19,16 @@ from ..deps import get_db
 from .sessions import list_session_runs
 
 router = APIRouter()
+
+
+def _load_env_json(var_name: str) -> Any:
+    raw = os.environ.get(var_name)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
 
 
 @router.get("/")
@@ -119,13 +130,17 @@ async def learn_plan(
             gpt4o_config = {
                 "provider": "OpenAIChatCompletionClient",
                 "config": {
-                    "model": "gpt-4o-2024-08-06",
+                    "model": os.environ.get("OPENAI_MODEL") or "gpt-4o-2024-08-06",
                     "api_key": os.environ.get("OPENAI_API_KEY"),
                 },
                 "max_retries": 5,
             }
             if os.environ.get("OPENAI_BASE_URL"):
                 gpt4o_config["config"]["base_url"] = os.environ.get("OPENAI_BASE_URL")
+
+            env_model_info = _load_env_json("OPENAI_MODEL_INFO")
+            if isinstance(env_model_info, dict):
+                gpt4o_config["config"]["model_info"] = env_model_info
             model_client = ChatCompletionClient.load_component(gpt4o_config)
 
         # 1. Retrieve messages from database

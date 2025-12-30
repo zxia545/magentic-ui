@@ -1,9 +1,11 @@
+import json
+import os
 from typing import Any, Dict, List, Optional, Union
 
 from autogen_agentchat.agents import UserProxyAgent
 from autogen_agentchat.base import ChatAgent
 from autogen_core import ComponentModel
-from autogen_core.models import ChatCompletionClient
+from autogen_core.models import ChatCompletionClient, ModelFamily
 
 from .agents import (
     USER_PROXY_DESCRIPTION,
@@ -50,17 +52,204 @@ async def get_task_team(
     if magentic_ui_config is None:
         magentic_ui_config = MagenticUIConfig()
 
+    default_model_info: Dict[str, Any] = {
+        "vision": True,
+        "function_calling": True,
+        "json_output": True,
+        "family": ModelFamily.UNKNOWN,
+        "structured_output": True,
+        "multiple_system_messages": True,
+    }
+
+    def _load_env_json(var_name: str) -> Any:
+        raw = os.environ.get(var_name)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _coerce_model_family(model_info: Dict[str, Any]) -> Dict[str, Any]:
+        family = model_info.get("family")
+        if isinstance(family, ModelFamily):
+            return model_info
+        if isinstance(family, str):
+            key = family.strip().upper()
+            # ModelFamily is an Enum; prefer attribute lookup by name.
+            if hasattr(ModelFamily, key):
+                model_info["family"] = getattr(ModelFamily, key)
+        return model_info
+
+    def _allow_autogen_ext_extra_body() -> None:
+        # autogen-ext validates `extra_create_args` keys against a hard-coded
+        # set derived from OpenAI's typed params. Some OpenAI-compatible
+        # gateways require request-level `extra_body`.
+        try:
+            from autogen_ext.models.openai import _openai_client as _autogen_openai_client  # type: ignore
+
+            create_kwargs = getattr(_autogen_openai_client, "create_kwargs", None)
+            if isinstance(create_kwargs, set):
+                create_kwargs.add("extra_body")
+        except Exception:
+            return
+
+    def _inject_extra_body(client: ChatCompletionClient, extra_body: Dict[str, Any]) -> ChatCompletionClient:
+        if not extra_body:
+            return client
+
+        _allow_autogen_ext_extra_body()
+
+        # Patch instance methods to always include `extra_body`.
+        orig_create = getattr(client, "create", None)
+        if callable(orig_create):
+
+            async def create(messages: Any, *args: Any, **kwargs: Any) -> Any:
+                extra_create_args = dict(kwargs.pop("extra_create_args", {}) or {})
+                extra_create_args.setdefault("extra_body", extra_body)
+                kwargs["extra_create_args"] = extra_create_args
+                return await orig_create(messages, *args, **kwargs)
+
+            setattr(client, "create", create)
+
+        orig_create_stream = getattr(client, "create_stream", None)
+        if callable(orig_create_stream):
+
+            async def create_stream(messages: Any, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+                extra_create_args = dict(kwargs.pop("extra_create_args", {}) or {})
+                extra_create_args.setdefault("extra_body", extra_body)
+                kwargs["extra_create_args"] = extra_create_args
+                async for chunk in orig_create_stream(messages, *args, **kwargs):
+                    yield chunk
+
+            setattr(client, "create_stream", create_stream)
+
+        return client
+
+    def _to_dict(cfg: Any) -> Any:
+        if cfg is None:
+            return None
+        if isinstance(cfg, dict):
+            return dict(cfg)
+        model_dump = getattr(cfg, "model_dump", None)
+        if callable(model_dump):
+            return model_dump()
+        return cfg
+
+    def _apply_openai_env_overrides(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
+        # Only apply to OpenAI-like providers.
+        provider = cfg_dict.get("provider")
+        if not isinstance(provider, str) or "OpenAI" not in provider:
+            return cfg_dict
+
+        inner = cfg_dict.get("config")
+        if not isinstance(inner, dict):
+            inner = {}
+
+        env_model = os.environ.get("OPENAI_MODEL")
+        if env_model:
+            inner["model"] = env_model
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            inner["api_key"] = env_key
+        env_base_url = os.environ.get("OPENAI_BASE_URL")
+        if env_base_url:
+            inner["base_url"] = env_base_url
+
+        env_model_info = _load_env_json("OPENAI_MODEL_INFO")
+        if isinstance(env_model_info, dict):
+            inner["model_info"] = _coerce_model_family(dict(env_model_info))
+
+        cfg_dict["config"] = inner
+        return cfg_dict
+
+    def _ensure_model_info(cfg_dict: Dict[str, Any]) -> Dict[str, Any]:
+        provider = cfg_dict.get("provider")
+        if not isinstance(provider, str) or "OpenAI" not in provider:
+            return cfg_dict
+
+        inner = cfg_dict.get("config")
+        if not isinstance(inner, dict):
+            inner = {}
+
+        if "model_info" not in inner:
+            env_model_info = _load_env_json("OPENAI_MODEL_INFO")
+            if isinstance(env_model_info, dict):
+                inner["model_info"] = _coerce_model_family(dict(env_model_info))
+            elif os.environ.get("OPENAI_MODEL"):
+                inner["model_info"] = dict(default_model_info)
+
+        cfg_dict["config"] = inner
+        return cfg_dict
+
+    def _prepare_model_client_config(
+        model_client_config: Union[ComponentModel, Dict[str, Any], None],
+        *,
+        is_action_guard: bool = False,
+    ) -> Any:
+        base_config = (
+            ModelClientConfigs.get_default_action_guard_config()
+            if is_action_guard
+            else ModelClientConfigs.get_default_client_config()
+        )
+
+        cfg = base_config if model_client_config is None else _to_dict(model_client_config)
+        if isinstance(cfg, dict):
+            cfg = _apply_openai_env_overrides(cfg)
+            cfg = _ensure_model_info(cfg)
+        return cfg
+
+    def _load_web_surfer_from_config(
+        config: WebSurferConfig,
+        *,
+        use_fara: bool,
+    ) -> WebSurfer:
+        builder = FaraWebSurfer if use_fara else WebSurfer
+        try:
+            return builder.from_config(config)
+        except ValueError as e:
+            if "model_info is required" in str(e):
+                model_client_cfg = _to_dict(config.model_client)
+                if isinstance(model_client_cfg, dict):
+                    inner = model_client_cfg.get("config")
+                    if not isinstance(inner, dict):
+                        inner = {}
+                    inner.setdefault("model_info", dict(default_model_info))
+                    model_client_cfg["config"] = inner
+                    updated_config = config.model_copy(update={"model_client": model_client_cfg})
+                    return builder.from_config(updated_config)
+            raise
+
     def get_model_client(
         model_client_config: Union[ComponentModel, Dict[str, Any], None],
         is_action_guard: bool = False,
     ) -> ChatCompletionClient:
-        if model_client_config is None:
-            return ChatCompletionClient.load_component(
-                ModelClientConfigs.get_default_client_config()
-                if not is_action_guard
-                else ModelClientConfigs.get_default_action_guard_config()
-            )
-        return ChatCompletionClient.load_component(model_client_config)
+        cfg = _prepare_model_client_config(
+            model_client_config,
+            is_action_guard=is_action_guard,
+        )
+
+        env_extra_body = _load_env_json("OPENAI_EXTRA_BODY")
+        extra_body: Dict[str, Any] = env_extra_body if isinstance(env_extra_body, dict) else {}
+
+        if isinstance(cfg, dict):
+            try:
+                client = ChatCompletionClient.load_component(cfg)
+                return _inject_extra_body(client, extra_body)
+            except ValueError as e:
+                # autogen-ext requires model_info for unknown model names.
+                if "model_info is required" in str(e):
+                    inner = cfg.get("config")
+                    if not isinstance(inner, dict):
+                        inner = {}
+                    inner.setdefault("model_info", dict(default_model_info))
+                    cfg["config"] = inner
+                    client = ChatCompletionClient.load_component(cfg)
+                    return _inject_extra_body(client, extra_body)
+                raise
+
+        client = ChatCompletionClient.load_component(cfg)
+        return _inject_extra_body(client, extra_body)
 
     if not magentic_ui_config.inside_docker:
         assert (
@@ -112,9 +301,9 @@ async def get_task_team(
         final_answer_prompt=magentic_ui_config.final_answer_prompt,
         sentinel_plan=magentic_ui_config.sentinel_plan,
     )
-    websurfer_model_client = magentic_ui_config.model_client_configs.web_surfer
-    if websurfer_model_client is None:
-        websurfer_model_client = ModelClientConfigs.get_default_client_config()
+    websurfer_model_client = _prepare_model_client_config(
+        magentic_ui_config.model_client_configs.web_surfer
+    )
     websurfer_config = WebSurferConfig(
         name="web_surfer",
         model_client=websurfer_model_client,
@@ -195,10 +384,16 @@ async def get_task_team(
             ),
         )
     with ApprovalGuardContext.populate_context(approval_guard):
-        if magentic_ui_config.use_fara_agent:
-            web_surfer = FaraWebSurfer.from_config(websurfer_config)
-        else:
-            web_surfer = WebSurfer.from_config(websurfer_config)
+        web_surfer = _load_web_surfer_from_config(
+            websurfer_config,
+            use_fara=magentic_ui_config.use_fara_agent,
+        )
+
+    env_extra_body = _load_env_json("OPENAI_EXTRA_BODY")
+    extra_body_websurfer: Dict[str, Any] = (
+        env_extra_body if isinstance(env_extra_body, dict) else {}
+    )
+    web_surfer._model_client = _inject_extra_body(web_surfer._model_client, extra_body_websurfer)
     if websurfer_loop_team:
         # simplified team of only the web surfer
         team = RoundRobinGroupChat(
