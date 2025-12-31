@@ -974,6 +974,7 @@ class Orchestrator(BaseGroupChatManager):
         context = self._thread_to_context()
         # Update the progress ledger
 
+        current_step = self._state.plan[self._state.current_step_idx]
         progress_ledger_prompt = self._get_progress_ledger_prompt(
             self._state.task,
             self._state.plan_str,
@@ -984,9 +985,36 @@ class Orchestrator(BaseGroupChatManager):
 
         context.append(UserMessage(content=progress_ledger_prompt, source=self._name))
 
-        progress_ledger = await self._get_json_response(
-            context, self._validate_ledger_json, cancellation_token
-        )
+        try:
+            progress_ledger = await self._get_json_response(
+                context, self._validate_ledger_json, cancellation_token
+            )
+        except Exception as exc:
+            fallback_agent = (
+                current_step.agent_name
+                if current_step.agent_name in self._agent_execution_names
+                else self._agent_execution_names[0]
+            )
+            progress_ledger = {
+                "is_current_step_complete": {
+                    "reason": f"Fallback after JSON error: {exc}",
+                    "answer": False,
+                },
+                "need_to_replan": {
+                    "reason": "Fallback to continue current step.",
+                    "answer": False,
+                },
+                "instruction_or_question": {
+                    "answer": current_step.details,
+                    "agent_name": fallback_agent,
+                },
+                "progress_summary": "Continuing current step after planner JSON error.",
+            }
+            await self._log_message_agentchat(
+                dict_to_str(progress_ledger),
+                internal=False,
+                metadata={"internal": "no", "type": "progress_message"},
+            )
         if self._state.is_paused:
             await self._request_next_speaker(self._user_agent_topic, cancellation_token)
             return
@@ -1033,7 +1061,6 @@ class Orchestrator(BaseGroupChatManager):
             )
             return
 
-        current_step = self._state.plan[self._state.current_step_idx]
         is_sentinel_step = (
             isinstance(current_step, SentinelPlanStep)
             and self._config.sentinel_plan.enable_sentinel_steps
@@ -1150,9 +1177,28 @@ class Orchestrator(BaseGroupChatManager):
                 source=self._name,
             )
         )
-        plan_response = await self._get_json_response(
-            context, self._validate_plan_json, cancellation_token
-        )
+        try:
+            plan_response = await self._get_json_response(
+                context, self._validate_plan_json, cancellation_token
+            )
+        except Exception as exc:
+            fallback_steps = []
+            if self._state.plan is not None:
+                fallback_steps = [
+                    step.model_dump() for step in self._state.plan.steps[self._state.current_step_idx :]
+                ]
+            plan_response = {
+                "task": self._state.task,
+                "steps": fallback_steps,
+                "needs_plan": True,
+                "response": "",
+                "plan_summary": f"Fallback: reuse remaining steps after JSON error ({exc}).",
+            }
+            await self._log_message_agentchat(
+                dict_to_str(plan_response),
+                internal=False,
+                metadata={"internal": "no", "type": "plan_message"},
+            )
         assert plan_response is not None
 
         # Create new plan by combining completed steps with new steps

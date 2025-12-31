@@ -11,7 +11,7 @@ export OPENAI_MODEL="${OPENAI_MODEL:-GLM-4.7}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://aiping.cn/api/v1}"
 
 # Keep secrets out of the repo: do NOT default the API key.
-export OPENAI_API_KEY="${OPENAI_API_KEY:-QC-fac549a3e1bd5a0121abdfdfd75d11ae-2ab8dae695593c9b3d5288a001a1180c}"
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 
 # Minimal capability hints needed by Magentic-UI agents.
 # You can override by setting OPENAI_MODEL_INFO to your own JSON.
@@ -19,7 +19,7 @@ export OPENAI_MODEL_INFO="${OPENAI_MODEL_INFO:-{\"vision\":false,\"function_call
 
 # For gateways like aiping.cn that require routing hints in the request body.
 # You can override by setting OPENAI_EXTRA_BODY to your own JSON.
-export OPENAI_EXTRA_BODY="${OPENAI_EXTRA_BODY:-{\"provider\":{\"only\":[],\"order\":[],\"sort\":null,\"input_price_range\":[],\"output_price_range\":[],\"input_length_range\":[],\"throughput_range\":[],\"latency_range\":[]}}}"
+export OPENAI_EXTRA_BODY="${OPENAI_EXTRA_BODY:-{\"provider\":{\"only\":[],\"order\":[],\"sort\":\"latency\",\"input_price_range\":[],\"output_price_range\":[],\"input_length_range\":[],\"throughput_range\":[],\"latency_range\":[]}}}"
 
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
 	echo "ERROR: OPENAI_API_KEY is not set." >&2

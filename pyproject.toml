@@ -48,6 +48,10 @@ dependencies = [
     "pyyaml",
     "html2text",
     "psutil",
+    "requests",
+    "beautifulsoup4",
+    "trafilatura",
+    "numpy",
 ]
 
 [project.urls]

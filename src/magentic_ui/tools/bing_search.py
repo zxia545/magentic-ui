@@ -1,3 +1,4 @@
+import os
 from urllib.parse import quote_plus
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
@@ -6,6 +7,18 @@ import tiktoken
 from dataclasses import dataclass
 from loguru import logger
 from ..tools import PlaywrightController
+
+
+def _chromium_sandbox_enabled() -> bool:
+    env = os.getenv("MAGENTIC_UI_CHROMIUM_SANDBOX")
+    if env is not None:
+        return env.lower() in {"1", "true", "yes"}
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 @dataclass
@@ -31,7 +44,10 @@ async def extract_page_markdown(url: str) -> tuple[str, str]:
         async with async_playwright() as p:
             launch_args = ["--disable-extensions", "--disable-file-system"]
             browser = await p.chromium.launch(
-                headless=True, env={}, args=launch_args, chromium_sandbox=True
+                headless=True,
+                env={},
+                args=launch_args,
+                chromium_sandbox=_chromium_sandbox_enabled(),
             )
             context = await browser.new_context(
                 accept_downloads=False,  # Disable downloads

@@ -12,6 +12,7 @@ from .agents import (
     CoderAgent,
     FileSurfer,
     FaraWebSurfer,
+    TalentSearchAgent,
     WebSurfer,
 )
 from .agents.mcp import McpAgent
@@ -275,6 +276,7 @@ async def get_task_team(
     model_client_file_surfer = get_model_client(
         magentic_ui_config.model_client_configs.file_surfer
     )
+    model_client_talent_search = model_client_orch
     browser_resource_config, _novnc_port, _playwright_port = (
         get_browser_resource_config(
             paths.external_run_dir,
@@ -403,6 +405,11 @@ async def get_task_team(
         return team
     coder_agent: CoderAgent | None = None
     file_surfer: FileSurfer | None = None
+    talent_search_agent = TalentSearchAgent(
+        name="talent_search_agent",
+        model_client=model_client_talent_search,
+        browser_resource=browser_resource_config,
+    )
     if not magentic_ui_config.run_without_docker:
         coder_agent = CoderAgent(
             name="coder_agent",
@@ -449,6 +456,7 @@ async def get_task_team(
         assert coder_agent is not None
         assert file_surfer is not None
         team_participants.extend([coder_agent, file_surfer])
+    team_participants.append(talent_search_agent)
     team_participants.extend(mcp_agents)
 
     team = GroupChat(

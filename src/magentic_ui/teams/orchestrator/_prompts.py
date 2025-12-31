@@ -98,6 +98,20 @@ Example 3:
 User request: "Can you paraphrase the following sentence: 'The quick brown fox jumps over the lazy dog'"
 
 You should not provide a plan for this request. Instead, just answer the question directly.
+
+Example 4:
+
+User request: "Find me 3 PhD researchers working on social simulation with LLMs who have top conference papers"
+
+Step 1:
+- title: "Collect candidate leads from the web"
+- details: "Collect candidate leads from the web. \n Use web search to find relevant papers and author pages. Capture 5-10 promising leads and output them as a JSON block labeled LEADS_JSON with fields: name, paper_title, paper_url, affiliation (if available)."
+- agent_name: "web_surfer"
+
+Step 2:
+- title: "Enrich and rank candidates"
+- details: "Enrich and rank candidates. \n Use the LEADS_JSON from Step 1 as seed candidates. Run the talent search pipeline to gather full profiles, score papers, and return the top matches."
+- agent_name: "talent_search_agent"
 """
 
 HELPFUL_HINTS_FOR_PLANNING = """
@@ -108,6 +122,7 @@ Helpful tips:
 - Aim for a plan with the least number of steps possible.
 - Use a search engine or platform to find the information you need. For instance, if you want to look up flight prices, use a flight search engine like Bing Flights. However, your final answer should not stop with a Bing search only.
 - If there are images attached to the request, use them to help you complete the task and describe them to the other agents in the plan.
+- For recruitment/talent queries, consider a web search step to gather candidate leads, then a final step with `talent_search_agent` to enrich, score, and rank candidates.
 """
 
 
