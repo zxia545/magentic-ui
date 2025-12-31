@@ -227,7 +227,8 @@ def searxng_search(
         if results:
             return results
         if config.VERBOSE:
-            print(f"[web_agent_search] no results for query: {query}, fallback to bing")
+            print(f"[web_agent_search] no results for query: {query}, fallback to HTML")
+        return _bing_html_search(query, k_per_query)
     results = None
     allow_playwright = getattr(config, "BING_USE_PLAYWRIGHT", True)
     try:

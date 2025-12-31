@@ -166,14 +166,16 @@ class DockerPlaywrightBrowser(PlaywrightBrowser):
         """
         retries = 0
         while True:
-            self._container = await self.create_container()
             try:
-                await asyncio.to_thread(self._container.start)
+                self._container = await self.create_container()
+                try:
+                    await asyncio.to_thread(self._container.reload)
+                except Exception:
+                    pass
+                if getattr(self._container, "status", None) != "running":
+                    await asyncio.to_thread(self._container.start)
                 break
             except DockerException as e:
-                # This throws an exception.. should we try/catch this as well?
-                # self._close_container()
-                # Try 3 times, then give up
                 retries += 1
                 if retries >= 3:
                     raise

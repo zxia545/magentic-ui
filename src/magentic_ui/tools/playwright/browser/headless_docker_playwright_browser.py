@@ -123,21 +123,28 @@ class HeadlessDockerPlaywrightBrowser(
             await asyncio.to_thread(client.images.pull, image_name)
             logger.info(f"Successfully pulled Docker image {image_name}")
 
-        return await asyncio.to_thread(
-            client.containers.create,
-            name=f"magentic-ui-headless-browser_{self._playwright_port}",
-            image=image_name,
-            detach=True,
-            auto_remove=True,
-            ports={
-                f"{self._playwright_port}/tcp": self._playwright_port,
-            },
-            command=[
-                "/bin/sh",
-                "-c",
-                f"npx -y playwright@1.51 run-server --port {self._playwright_port} --host 0.0.0.0",
-            ],
-        )
+        name = f"magentic-ui-headless-browser_{self._playwright_port}"
+        try:
+            return await asyncio.to_thread(
+                client.containers.create,
+                name=name,
+                image=image_name,
+                detach=True,
+                auto_remove=True,
+                ports={
+                    f"{self._playwright_port}/tcp": self._playwright_port,
+                },
+                command=[
+                    "/bin/sh",
+                    "-c",
+                    f"npx -y playwright@1.51 run-server --port {self._playwright_port} --host 0.0.0.0",
+                ],
+            )
+        except docker.errors.APIError as exc:
+            if getattr(exc, "status_code", None) == 409 or "Conflict" in str(exc):
+                logger.info(f"Container {name} already exists, reusing it.")
+                return await asyncio.to_thread(client.containers.get, name)
+            raise
 
     def _to_config(self) -> HeadlessBrowserConfig:
         return HeadlessBrowserConfig(

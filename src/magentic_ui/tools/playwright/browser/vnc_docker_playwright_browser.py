@@ -161,26 +161,32 @@ class VncDockerPlaywrightBrowser(
 
         client = docker.from_env()
 
-        return await asyncio.to_thread(
-            client.containers.create,
-            name=self._docker_name,
-            image=self._image,
-            detach=True,
-            auto_remove=True,
-            network=self._network_name if self._inside_docker else None,
-            ports={
-                f"{self._playwright_port}/tcp": self._playwright_port,
-                f"{self._novnc_port}/tcp": self._novnc_port,
-            },
-            volumes={
-                str(self._bind_dir.resolve()): {"bind": "/workspace", "mode": "rw"}
-            },
-            environment={
-                "PLAYWRIGHT_WS_PATH": self._playwright_websocket_path,
-                "PLAYWRIGHT_PORT": str(self._playwright_port),
-                "NO_VNC_PORT": str(self._novnc_port),
-            },
-        )
+        try:
+            return await asyncio.to_thread(
+                client.containers.create,
+                name=self._docker_name,
+                image=self._image,
+                detach=True,
+                auto_remove=True,
+                network=self._network_name if self._inside_docker else None,
+                ports={
+                    f"{self._playwright_port}/tcp": self._playwright_port,
+                    f"{self._novnc_port}/tcp": self._novnc_port,
+                },
+                volumes={
+                    str(self._bind_dir.resolve()): {"bind": "/workspace", "mode": "rw"}
+                },
+                environment={
+                    "PLAYWRIGHT_WS_PATH": self._playwright_websocket_path,
+                    "PLAYWRIGHT_PORT": str(self._playwright_port),
+                    "NO_VNC_PORT": str(self._novnc_port),
+                },
+            )
+        except docker.errors.APIError as exc:
+            if getattr(exc, "status_code", None) == 409 or "Conflict" in str(exc):
+                logger.info(f"Container {self._docker_name} already exists, reusing it.")
+                return await asyncio.to_thread(client.containers.get, self._docker_name)
+            raise
 
     def _to_config(self) -> VncDockerPlaywrightBrowserConfig:
         return VncDockerPlaywrightBrowserConfig(
