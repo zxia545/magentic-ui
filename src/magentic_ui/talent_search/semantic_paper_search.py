@@ -91,6 +91,18 @@ class SemanticScholarClient:
                 backoff = min(backoff * 2, 8.0)
         return {}
 
+    def _get_paper_by_id(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        if not paper_id:
+            return None
+        params = {
+            "fields": "paperId,title,abstract,tldr,authors,url,externalIds,openAccessPdf,year,venue,citationCount"
+        }
+        try:
+            result = self._get(f"/paper/{paper_id}", params)
+            return result if isinstance(result, dict) else None
+        except Exception:
+            return None
+
     @staticmethod
     def _normalize_title(t: str) -> str:
         """
@@ -209,11 +221,36 @@ class SemanticScholarClient:
             print(f"[S2 Full Details] Match score too low ({match_score:.2f} < {min_match_score}): {title[:60]}...")
             return None
         
+        paper_id = item.get("paperId", "")
+        needs_fetch = (
+            not item.get("abstract")
+            or not item.get("authors")
+            or not item.get("externalIds")
+            or not item.get("openAccessPdf")
+        )
+        if needs_fetch and paper_id:
+            fetched = self._get_paper_by_id(paper_id)
+            if isinstance(fetched, dict):
+                for field in [
+                    "abstract",
+                    "tldr",
+                    "authors",
+                    "externalIds",
+                    "openAccessPdf",
+                    "year",
+                    "venue",
+                    "citationCount",
+                    "url",
+                    "title",
+                ]:
+                    if not item.get(field) and fetched.get(field):
+                        item[field] = fetched.get(field)
+
         # 提取 abstract（确保不是 None）
         abstract = item.get("abstract") or ""
         if not abstract:
             print(f"[S2 Full Details] No abstract available for: {title[:60]}...")
-        
+
         # 提取 tldr（AI生成的简短总结，可作为introduction替代）
         tldr_obj = item.get("tldr") or {}
         tldr_text = ""
@@ -221,12 +258,12 @@ class SemanticScholarClient:
             tldr_text = tldr_obj.get("text") or ""
         elif isinstance(tldr_obj, str):
             tldr_text = tldr_obj or ""
-        
+
         # 提取外部ID（arXiv, DOI等）
         external_ids = item.get("externalIds", {}) or {}
         arxiv_id = external_ids.get("ArXiv", "")
         arxiv_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
-        
+
         # 提取PDF链接，fallback到arXiv
         open_access_pdf = item.get("openAccessPdf", {}) or {}
         pdf_url = ""
@@ -235,14 +272,26 @@ class SemanticScholarClient:
         # Fallback: use arXiv PDF URL if available
         if not pdf_url and arxiv_id:
             pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        
+
         # 提取作者信息
-        authors_data = item.get("authors", [])
+        authors_data = item.get("authors", []) or []
+        if not authors_data and paper_id:
+            try:
+                authors_data = self.get_paper_authors(paper_id)
+            except Exception:
+                authors_data = []
         authors = []
         author_ids = []
         for a in authors_data:
-            author_name = a.get("name", "")
-            author_id = a.get("authorId", "")
+            if isinstance(a, Author):
+                author_name = a.name
+                author_id = a.authorId
+            elif isinstance(a, dict):
+                author_name = a.get("name", "")
+                author_id = a.get("authorId", "")
+            else:
+                author_name = getattr(a, "name", "")
+                author_id = getattr(a, "authorId", "")
             if author_name:
                 authors.append(author_name)
                 # 这样可以确保 author_ids 列表的长度与 authors 列表的长度一致

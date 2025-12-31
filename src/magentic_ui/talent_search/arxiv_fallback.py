@@ -20,7 +20,7 @@ class ArxivFallbackClient:
         Args:
             requests_per_second: 速率限制（arXiv建议每3秒1次，即0.33 rps）
         """
-        self.base_url = "http://export.arxiv.org/api/query"
+        self.base_url = "https://export.arxiv.org/api/query"
         self._last_call_ts = 0.0
         self._min_interval = 1.0 / requests_per_second
         self._lock = threading.Lock()
@@ -73,58 +73,74 @@ class ArxivFallbackClient:
         normalized_title = self._normalize_title(title)
         print(f"[arXiv Fallback] Query string: {normalized_title[:80]}...")
         
-        # arXiv API 查询参数
-        params = {
-            "search_query": f'ti:"{normalized_title}"',
-            "max_results": max_results,
-            "sortBy": "relevance",
-            "sortOrder": "descending"
-        }
-        
+        titles_to_try = [normalized_title]
+        if ":" in normalized_title:
+            suffix = normalized_title.split(":", 1)[1].strip()
+            if suffix:
+                titles_to_try.append(suffix)
+        if " - " in normalized_title:
+            prefix = normalized_title.split(" - ", 1)[0].strip()
+            if prefix:
+                titles_to_try.append(prefix)
+        seen_titles = set()
+        unique_titles = []
+        for t in titles_to_try:
+            key = t.lower().strip()
+            if key and key not in seen_titles:
+                seen_titles.add(key)
+                unique_titles.append(t)
+
         try:
-            response = None
             max_attempts = 4
             base_backoff = 3.0
 
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    self._throttle()
-                    response = requests.get(self.base_url, params=params, timeout=10)
-                    if response.status_code == 429:
-                        wait = self._compute_backoff(attempt, base_backoff, response.headers.get("Retry-After"))
-                        print(f"[arXiv Fallback] Rate limited (429). Waiting {wait:.1f}s before retry {attempt}/{max_attempts}")
+            def _query_arxiv(query_title: str) -> Optional[requests.Response]:
+                params = {
+                    "search_query": f'ti:"{query_title}"',
+                    "max_results": max_results,
+                    "sortBy": "relevance",
+                    "sortOrder": "descending"
+                }
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        self._throttle()
+                        resp = requests.get(self.base_url, params=params, timeout=10)
+                        if resp.status_code == 429:
+                            wait = self._compute_backoff(attempt, base_backoff, resp.headers.get("Retry-After"))
+                            print(f"[arXiv Fallback] Rate limited (429). Waiting {wait:.1f}s before retry {attempt}/{max_attempts}")
+                            time.sleep(wait)
+                            continue
+                        resp.raise_for_status()
+                        return resp
+                    except requests.RequestException as e:
+                        if attempt >= max_attempts:
+                            print(f"[arXiv Fallback] Request error after {attempt} attempts: {e}")
+                            return None
+                        wait = self._compute_backoff(attempt, base_backoff)
+                        print(f"[arXiv Fallback] Request error ({e}), retrying in {wait:.1f}s ({attempt}/{max_attempts})")
                         time.sleep(wait)
-                        continue
-                    response.raise_for_status()
-                    break
-                except requests.RequestException as e:
-                    if attempt >= max_attempts:
-                        print(f"[arXiv Fallback] Request error after {attempt} attempts: {e}")
-                        return None
-                    wait = self._compute_backoff(attempt, base_backoff)
-                    print(f"[arXiv Fallback] Request error ({e}), retrying in {wait:.1f}s ({attempt}/{max_attempts})")
-                    time.sleep(wait)
-            else:
-                return None
-            
-            if response is None:
-                print("[arXiv Fallback] No valid response received after retries")
                 return None
 
-            # 解析 Atom XML 响应
-            root = ET.fromstring(response.content)
-            
-            # 命名空间
-            ns = {
-                'atom': 'http://www.w3.org/2005/Atom',
-                'arxiv': 'http://arxiv.org/schemas/atom'
-            }
-            
-            # 查找所有条目
-            entries = root.findall('atom:entry', ns)
-            
+            entries = []
+            for query_title in unique_titles:
+                print(f"[arXiv Fallback] Query string: {query_title[:80]}...")
+                response = _query_arxiv(query_title)
+                if not response:
+                    continue
+
+                # 解析 Atom XML 响应
+                root = ET.fromstring(response.content)
+                ns = {
+                    'atom': 'http://www.w3.org/2005/Atom',
+                    'arxiv': 'http://arxiv.org/schemas/atom'
+                }
+                entries = root.findall('atom:entry', ns)
+                if entries:
+                    normalized_title = query_title
+                    break
+
             if not entries:
-                print(f"[arXiv Fallback] No results found")
+                print("[arXiv Fallback] No results found")
                 return None
             
             # 获取第一个结果（最相关）

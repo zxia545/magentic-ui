@@ -188,25 +188,37 @@ async def _web_agent_search_async(query: str, k: int) -> List[Dict[str, str]]:
             search_url = f"https://scholar.google.com/scholar?q={quote_plus(query)}"
             parser = _parse_scholar_html_from_page
             engine_name = "scholar_web_agent"
+            ready_selector = "div.gs_ri"
         else:
             search_url = f"https://www.bing.com/search?q={quote_plus(query)}&FORM=QBLH"
             parser = _parse_bing_html_from_page
             engine_name = "bing_web_agent"
+            ready_selector = "li.b_algo"
         page = await context.new_page()
         try:
             page.set_default_timeout(config.WEB_AGENT_TIMEOUT_SEC * 1000)
             await page.goto(search_url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_selector(ready_selector, timeout=5000)
+            except Exception:
+                pass
             await asyncio.sleep(1)
-            markdown = await controller.get_page_markdown(
-                page, max_tokens=config.WEB_AGENT_MAX_TOKENS
-            )
             html = await page.content()
             results = parser(html, k)
             if results:
                 return results
-            results = _parse_markdown_links(markdown, k, engine_name)
-            if results:
-                return results
+            markdown = ""
+            try:
+                markdown = await controller.get_page_markdown(
+                    page, max_tokens=config.WEB_AGENT_MAX_TOKENS
+                )
+            except Exception as exc:
+                if config.VERBOSE:
+                    print(f"[web_agent_search] markdown error: {exc!r} for query: {query}")
+            if markdown:
+                results = _parse_markdown_links(markdown, k, engine_name)
+                if results:
+                    return results
         except Exception as exc:
             if config.VERBOSE:
                 print(f"[web_agent_search] error: {exc!r} for query: {query}")
@@ -969,37 +981,38 @@ def extract_full_pdf_text(
         If return_bytes=False: Full text or None if failed
         If return_bytes=True: (text, pdf_bytes) tuple for reusing downloaded PDF
     """
+    # Download PDF first (shared by all extraction backends)
+    pdf_bytes = None
+    try:
+        response = requests.get(
+            pdf_url,
+            timeout=30,
+            headers=config.UA,
+            stream=True
+        )
+        if response.status_code == 200:
+            pdf_bytes = b""
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    pdf_bytes += chunk
+                    # Stop if exceeds reasonable size (100MB)
+                    if len(pdf_bytes) > 100 * 1024 * 1024:
+                        print("[PDF Extract] File too large, stopping download")
+                        return (None, None) if return_bytes else None
+    except Exception as e:
+        print(f"[PDF Extract] Download error: {e}")
+        return (None, None) if return_bytes else None
+
+    if not pdf_bytes or len(pdf_bytes) < 1000:
+        print("[PDF Extract] Invalid PDF data")
+        return (None, None) if return_bytes else None
+
     try:
         import fitz  # PyMuPDF
-        # Download PDF
-        pdf_bytes = None
-        try:
-            response = requests.get(
-                pdf_url,
-                timeout=30,
-                headers=config.UA,
-                stream=True
-            )
-            
-            if response.status_code == 200:
-                pdf_bytes = b''
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        pdf_bytes += chunk
-                        # Stop if exceeds reasonable size (100MB)
-                        if len(pdf_bytes) > 100 * 1024 * 1024:
-                            print(f"[PDF Extract] File too large, stopping download")
-                            return (None, None) if return_bytes else None
-        except Exception as e:
-            print(f"[PDF Extract] Download error: {e}")
-            return (None, None) if return_bytes else None
-        if not pdf_bytes or len(pdf_bytes) < 1000:
-            print(f"[PDF Extract] Invalid PDF data")
-            return (None, None) if return_bytes else None
         # Extract text from all pages
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         text_parts = []
-        
+
         for page_num in range(doc.page_count):
             page = doc[page_num]
             text = page.get_text("text")
@@ -1020,7 +1033,22 @@ def extract_full_pdf_text(
         return full_text
     except Exception as e:
         print(f"[PDF Extract] Error: {e}")
-        return (None, None) if return_bytes else None
+        try:
+            from pdfminer.high_level import extract_text as pdf_extract
+
+            text = pdf_extract(io.BytesIO(pdf_bytes)) or ""
+            if not text.strip():
+                print("[PDF Extract] pdfminer returned empty text")
+                return (None, None) if return_bytes else None
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n... [truncated]"
+            print(f"[PDF Extract] Extracted {len(text)} chars with pdfminer fallback")
+            if return_bytes:
+                return (text, pdf_bytes)
+            return text
+        except Exception as pdf_err:
+            print(f"[PDF Extract] pdfminer fallback error: {pdf_err}")
+            return (None, None) if return_bytes else None
 # ============ SINGLE DIMENSION SCORING ============
 def score_single_dimension(
     dimension_name: str,
@@ -1161,6 +1189,9 @@ def score_paper_multidim(
         paper_content = f"Title: {title}\n\nAbstract: {abstract}"
         method = "abstract"
         print(f"[Multi-Dim Scoring] Using abstract only ({len(abstract)} chars)")
+    max_llm_chars = getattr(config, "LLM_PAPER_MAX_CHARS", 60000)
+    if max_llm_chars > 0 and len(paper_content) > max_llm_chars:
+        paper_content = paper_content[:max_llm_chars] + "\n... [truncated]"
     # Step 2: Define relevance dimensions (5 dimensions)
     relevance_config = {
         "problem_objective": ("Problem & Objective Alignment", PROMPT_PROBLEM_OBJECTIVE),

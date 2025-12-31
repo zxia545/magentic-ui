@@ -52,6 +52,20 @@ _BLOCKED_DOMAINS = {
     "wps.cn",
 }
 
+_NON_PAPER_TITLE_TOKENS = {
+    "paper digest",
+    "highlights",
+    "key ideas",
+    "news",
+    "blog",
+    "press release",
+    "call for papers",
+    "cfp",
+    "workshop summary",
+    "roundup",
+    "recap",
+}
+
 _STOPWORD_TOKENS = {
     "paper",
     "papers",
@@ -118,6 +132,10 @@ def _should_consider_result(item: Dict[str, Any], keywords: Optional[List[str]])
     domain = _domain_from_url(url)
     if domain and any(domain.endswith(b) for b in _BLOCKED_DOMAINS):
         return False
+    title_lc = title.lower()
+    if domain and not any(domain.endswith(d) for d in _ACADEMIC_DOMAINS):
+        if any(token in title_lc for token in _NON_PAPER_TITLE_TOKENS):
+            return False
     text = f"{title} {snippet}".strip().lower()
     if domain and any(domain.endswith(d) for d in _ACADEMIC_DOMAINS):
         return True
@@ -132,6 +150,7 @@ def _should_consider_result(item: Dict[str, Any], keywords: Optional[List[str]])
 def _normalize_candidate_title(raw_title: str) -> str:
     title = raw_title.strip()
     title = re.sub(r"\s*\[pdf\]\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*(?:\.\.\.|…)\s*$", "", title)
     if not title:
         return ""
     parts = _TITLE_SPLIT_RE.split(title)
@@ -146,6 +165,50 @@ def _normalize_candidate_title(raw_title: str) -> str:
             title = ""
             break
     return title.strip()
+
+
+def _strip_title_prefixes(title: str) -> str:
+    if not title:
+        return ""
+    prefixes = [
+        r"^position\s*:\s*",
+        r"^poster\s*:\s*",
+        r"^oral\s*:\s*",
+        r"^spotlight\s*:\s*",
+        r"^demo\s*:\s*",
+        r"^tutorial\s*:\s*",
+        r"^workshop\s*:\s*",
+        r"^paper\s+digest\s*:\s*",
+        r"^(?:icml|iclr|neurips|acl|emnlp|naacl|cvpr|iccv|eccv)\s+poster\s*:\s*",
+        r"^(?:icml|iclr|neurips|acl|emnlp|naacl|cvpr|iccv|eccv)\s+oral\s*:\s*",
+        r"^(?:icml|iclr|neurips|acl|emnlp|naacl|cvpr|iccv|eccv)\s+spotlight\s*:\s*",
+        r"^(?:icml|iclr|neurips|acl|emnlp|naacl|cvpr|iccv|eccv)\s+poster\s+position\s*:\s*",
+    ]
+    stripped = title
+    for pattern in prefixes:
+        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
+    return stripped
+
+
+def _candidate_title_variants(raw_title: str) -> List[str]:
+    variants: List[str] = []
+    normalized = _normalize_candidate_title(raw_title)
+    if normalized:
+        variants.append(normalized)
+    stripped = _strip_title_prefixes(normalized or raw_title)
+    if stripped:
+        variants.append(stripped)
+    raw = raw_title.strip()
+    if raw and (not stripped or raw.lower().strip() == stripped.lower().strip()):
+        variants.append(raw)
+    unique: List[str] = []
+    seen = set()
+    for v in variants:
+        key = v.lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(v)
+    return unique
 
 
 def build_bing_query(
@@ -255,7 +318,13 @@ def search_papers_bing(
 ) -> List[Dict[str, Any]]:
     if not query:
         return []
-    seen_titles = {t.lower().strip() for t in (seen_titles or set()) if t}
+    if seen_titles is None:
+        seen_titles_set: Set[str] = set()
+    else:
+        seen_titles_set = seen_titles
+    normalized_seen = {t.lower().strip() for t in seen_titles_set if t}
+    seen_titles_set.clear()
+    seen_titles_set.update(normalized_seen)
     min_match = min_match_score or config.BING_PAPER_MIN_MATCH_SCORE
     max_results = max(k_per_query * 3, config.BING_PAPER_MAX_RESULTS)
     results = search.searxng_search(query, pages=1, k_per_query=max_results)
@@ -269,43 +338,69 @@ def search_papers_bing(
     )
     arxiv_client = ArxivFallbackClient()
     papers: List[Dict[str, Any]] = []
+    relaxed_papers: List[Dict[str, Any]] = []
+    relaxed_seen: Set[str] = set()
+    details_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
     if results:
         for item in results:
             if not _should_consider_result(item, keywords):
                 continue
             raw_title = (item.get("title") or "").strip()
-            candidate_title = _normalize_candidate_title(raw_title)
-            if not candidate_title:
-                continue
-            title_key = candidate_title.lower().strip()
-            if title_key in seen_titles:
-                continue
-
-            details = s2_client.get_paper_full_details(
-                title=candidate_title,
-                year=None,
-                venue=None,
-                min_match_score=min_match,
-            )
+            title_variants = _candidate_title_variants(raw_title)
+            details = None
+            attempted_title_keys = set()
+            for candidate_title in title_variants:
+                if not candidate_title:
+                    continue
+                title_key = candidate_title.lower().strip()
+                attempted_title_keys.add(title_key)
+                if title_key in seen_titles_set:
+                    continue
+                if title_key in details_cache:
+                    details = details_cache[title_key]
+                else:
+                    details = s2_client.get_paper_full_details(
+                        title=candidate_title,
+                        year=None,
+                        venue=None,
+                        min_match_score=min_match,
+                    )
+                    if not details:
+                        details = arxiv_client.search_by_title(candidate_title, max_results=3)
+                    details_cache[title_key] = details
+                if details:
+                    break
             if not details:
-                details = arxiv_client.search_by_title(candidate_title, max_results=3)
-            if not details:
+                seen_titles_set.update(attempted_title_keys)
                 continue
 
             paper = _paper_from_details(details, query=query, fallback_url=item.get("url", ""))
             if not _passes_year_venue(paper, years, venues):
+                title_key = (paper.get("title") or "").lower().strip()
+                if title_key and title_key not in relaxed_seen:
+                    relaxed_seen.add(title_key)
+                    relaxed_papers.append(paper)
+                seen_titles_set.update(attempted_title_keys)
                 continue
             papers.append(paper)
-            seen_titles.add(title_key)
+            title_key = (paper.get("title") or "").lower().strip()
+            if title_key:
+                seen_titles_set.add(title_key)
+            seen_titles_set.update(attempted_title_keys)
             if len(papers) >= k_per_query:
                 break
 
-    if papers:
+    if len(papers) >= k_per_query:
         return papers
 
     if config.VERBOSE:
-        print(f"[Bing Search] No valid papers from Bing for '{query}', fallback to Semantic Scholar search")
+        if papers:
+            print(
+                f"[Bing Search] Only {len(papers)}/{k_per_query} papers from Bing for '{query}', topping up via Semantic Scholar search"
+            )
+        else:
+            print(f"[Bing Search] No valid papers from Bing for '{query}', fallback to Semantic Scholar search")
 
     fallback_query = " ".join(keywords or []) or query
     s2_items = s2_client.search_papers(
@@ -317,18 +412,56 @@ def search_papers_bing(
         if not title:
             continue
         title_key = title.lower().strip()
-        if title_key in seen_titles:
+        if title_key in seen_titles_set:
             continue
         if not _passes_year_venue(item, years, venues):
+            paper = _paper_from_s2_search_item(item, query=fallback_query)
+            if title_key and title_key not in relaxed_seen:
+                relaxed_seen.add(title_key)
+                relaxed_papers.append(paper)
+            seen_titles_set.add(title_key)
             continue
+        if (not item.get("authors") or not item.get("abstract")) and item.get("paperId"):
+            fetched = s2_client._get_paper_by_id(item.get("paperId"))
+            if isinstance(fetched, dict):
+                for field in [
+                    "abstract",
+                    "tldr",
+                    "authors",
+                    "externalIds",
+                    "openAccessPdf",
+                    "year",
+                    "venue",
+                    "citationCount",
+                    "url",
+                    "title",
+                ]:
+                    if not item.get(field) and fetched.get(field):
+                        item[field] = fetched.get(field)
         paper = _paper_from_s2_search_item(item, query=fallback_query)
         if keywords and not _matches_keywords(
             f"{paper.get('title', '')} {paper.get('abstract', '')}", keywords
         ):
             continue
         papers.append(paper)
-        seen_titles.add(title_key)
+        seen_titles_set.add(title_key)
         if len(papers) >= k_per_query:
             break
+
+    if len(papers) < k_per_query and (years or venues) and relaxed_papers:
+        existing_titles = {
+            (p.get("title") or "").lower().strip()
+            for p in papers
+            if (p.get("title") or "").strip()
+        }
+        for paper in relaxed_papers:
+            if len(papers) >= k_per_query:
+                break
+            title_key = (paper.get("title") or "").lower().strip()
+            if not title_key or title_key in existing_titles:
+                continue
+            papers.append(paper)
+            existing_titles.add(title_key)
+            seen_titles_set.add(title_key)
 
     return papers

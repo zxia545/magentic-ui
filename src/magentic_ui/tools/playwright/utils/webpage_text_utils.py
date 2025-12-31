@@ -97,15 +97,23 @@ class WebpageTextUtilsPlaywright:
             return limited_content
 
         # Regular webpage processing
-        if self._markdown_converter is None:
-            from markitdown import MarkItDown  # Lazy import
+        text_content = ""
+        try:
+            if self._markdown_converter is None:
+                from markitdown import MarkItDown  # Lazy import
 
-            self._markdown_converter = MarkItDown()
-        html = await page.evaluate("document.documentElement.outerHTML;")
-        res = self._markdown_converter.convert_stream(
-            io.BytesIO(html.encode("utf-8")), file_extension=".html", url=page.url
-        )  # type: ignore
-        text_content = res.text_content  # type: ignore
+                self._markdown_converter = MarkItDown()
+            html = await page.evaluate("document.documentElement.outerHTML;")
+            res = self._markdown_converter.convert_stream(
+                io.BytesIO(html.encode("utf-8")), file_extension=".html", url=page.url
+            )  # type: ignore
+            text_content = res.text_content  # type: ignore
+        except Exception as exc:
+            logger.warning("MarkItDown failed, falling back to innerText: %r", exc)
+            try:
+                text_content = await page.evaluate("document.body.innerText;")
+            except Exception:
+                text_content = ""
 
         # Tokenize the text content and limit to max_tokens
         if max_tokens == -1:

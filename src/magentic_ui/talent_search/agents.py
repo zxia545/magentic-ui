@@ -1885,6 +1885,7 @@ def _run_search_terms(
     years: Optional[List[int]] = None,
     venues: Optional[List[str]] = None,
     seen_titles: Optional[Set[str]] = None,
+    term_index: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Search for papers using Bing, then enrich with Semantic Scholar/arXiv metadata.
@@ -1896,43 +1897,40 @@ def _run_search_terms(
     from .paper_search import build_bing_query, search_papers_bing
 
     all_results: List[Dict[str, Any]] = []
-    seen_titles = {t.lower().strip() for t in (seen_titles or set()) if t}
-
-    while len(all_results) < k_per_query:
-        current_term = None
-        for t in terms:
+    seen_titles = seen_titles or set()
+    if term_index is None:
+        for idx, t in enumerate(terms):
             if not t.get("exhausted", False):
-                current_term = t
+                term_index = idx
                 break
-        if current_term is None:
-            print(f"[Bing Search] All terms exhausted, collected {len(all_results)} papers")
-            break
+    if term_index is None or term_index >= len(terms):
+        print("[Bing Search] All terms exhausted, collected 0 papers")
+        return [], False
 
-        keywords = current_term.get("keywords", [])
-        query = build_bing_query(keywords, years=years, venues=venues)
-        attempts = current_term.get("offset", 0) + 1
-        papers_needed = k_per_query - len(all_results)
-        print(f"[Bing Search] Searching: {query} (attempt={attempts}, need={papers_needed})")
+    current_term = terms[term_index]
+    if current_term.get("exhausted", False):
+        has_more = any(not t.get("exhausted", False) for t in terms)
+        return [], has_more
 
-        new_results = search_papers_bing(
-            query=query,
-            k_per_query=papers_needed,
-            keywords=keywords,
-            years=years,
-            venues=venues,
-            seen_titles=seen_titles,
-        )
+    keywords = current_term.get("keywords", [])
+    query = build_bing_query(keywords, years=years, venues=venues)
+    attempts = current_term.get("offset", 0) + 1
+    print(f"[Bing Search] Searching: {query} (attempt={attempts}, need={k_per_query})")
 
-        if not new_results:
-            current_term["exhausted"] = True
-            print(f"[Bing Search] No new papers for '{query}', marking variant exhausted")
-            continue
+    new_results = search_papers_bing(
+        query=query,
+        k_per_query=k_per_query,
+        keywords=keywords,
+        years=years,
+        venues=venues,
+        seen_titles=seen_titles,
+    )
 
+    if not new_results:
+        current_term["exhausted"] = True
+        print(f"[Bing Search] No new papers for '{query}', marking variant exhausted")
+    else:
         current_term["offset"] = attempts
-        for paper in new_results:
-            title_key = (paper.get("title") or "").lower().strip()
-            if title_key:
-                seen_titles.add(title_key)
         all_results.extend(new_results)
 
     has_more = any(not t.get("exhausted", False) for t in terms)
@@ -2726,12 +2724,18 @@ def agent_execute_search(
                 for p in all_scored_papers.values()
                 if getattr(p, "title", "").strip()
             }
+            seen_titles.update(
+                (it.get("title") or "").lower().strip()
+                for it in all_serp
+                if (it.get("title") or "").strip()
+            )
             serp, has_more_papers = _run_search_terms(
                 terms,
                 k_per_query=10,
                 years=spec.years,
                 venues=spec.venues,
                 seen_titles=seen_titles,
+                term_index=current_term_idx,
             )
         print(f"[Round {rounds_completed}] Got {len(serp)} papers, has_more={has_more_papers}")
         if seed_candidates_input and not seed_serp_used:
@@ -2739,23 +2743,22 @@ def agent_execute_search(
         
         # ==================== Query Pool: 检测当前variant是否exhausted ====================
         min_papers_threshold = config.QUERY_POOL_CONFIG.get("min_papers_per_batch", 5)
+        pending_term_idx = None
         if (not seed_serp_used) and (not seed_candidates_input) and (
             current_term.get("exhausted", False) or len(serp) < min_papers_threshold
         ):
             print(f"[Query Pool] Variant {current_term_idx} ({current_term['name']}) exhausted (获取={len(serp)}篇论文, 阈值={min_papers_threshold})")
             current_term["exhausted"] = True
-            current_term_idx += 1
             consecutive_empty_batches = 0  # 重置空批次计数
-            
-            if current_term_idx < len(terms):
-                next_variant = terms[current_term_idx]
-                print(f"[Query Pool] 切换到Variant {current_term_idx}: {next_variant['keywords']} ({next_variant['name']})")
-                print(f"[Query Pool] 立即开始下一轮搜索...")
-                continue  # 立即跳到下一轮使用新variant获取论文
+
+            next_idx = current_term_idx + 1
+            if next_idx < len(terms):
+                pending_term_idx = next_idx
+                next_variant = terms[next_idx]
+                print(f"[Query Pool] 本轮处理完成后切换到Variant {next_idx}: {next_variant['keywords']} ({next_variant['name']})")
             else:
                 print(f"[Query Pool] 所有variants已用完")
                 has_more_papers = False
-                break  # 结束搜索
         # ==============================================================
         if not serp:
             print(f"[Round {rounds_completed}] WARNING: No papers found in this round!")
@@ -2795,6 +2798,8 @@ def agent_execute_search(
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         papers_to_score = []
+        s2_details_cache = {}
+        s2_client = None
         for serp_item in new_serp_items:
             url = serp_item.get("url", "")
             title = serp_item.get("title", "")
@@ -2803,6 +2808,57 @@ def agent_execute_search(
             introduction = serp_item.get("introduction") or ""  # Semantic Scholar TLDR，确保不是None
             abstract = serp_item.get("abstract", "") or serp_item.get("snippet", "")
             
+            # Backfill missing author list (needed for candidate extraction)
+            if not serp_item.get("authors"):
+                if s2_client is None:
+                    try:
+                        from .semantic_paper_search import SemanticScholarClient
+                        s2_client = SemanticScholarClient(
+                            api_key=config.SEMANTIC_SCHOLAR_API_KEY or None,
+                            timeout=12.0,
+                            requests_per_second=1.0,
+                        )
+                    except Exception:
+                        s2_client = None
+                if s2_client:
+                    cache_key = serp_item.get("paper_id") or title.lower().strip()
+                    details = s2_details_cache.get(cache_key)
+                    if details is None:
+                        details = None
+                        paper_id = serp_item.get("paper_id") or ""
+                        if paper_id:
+                            details = s2_client._get_paper_by_id(paper_id)
+                        if not details and title:
+                            details = s2_client.get_paper_full_details(
+                                title=title,
+                                year=str(serp_item.get("year") or "") or None,
+                                venue=serp_item.get("venue") or None,
+                                min_match_score=config.BING_PAPER_MIN_MATCH_SCORE,
+                            )
+                        s2_details_cache[cache_key] = details
+                    if isinstance(details, dict):
+                        raw_authors = details.get("authors") or []
+                        if raw_authors and isinstance(raw_authors[0], dict):
+                            serp_item["authors"] = [a.get("name", "") for a in raw_authors if a.get("name")]
+                            serp_item["author_ids"] = [
+                                a.get("authorId") if isinstance(a.get("authorId"), str) and a.get("authorId").strip() else None
+                                for a in raw_authors
+                            ]
+                        elif raw_authors:
+                            serp_item["authors"] = raw_authors
+                        if not serp_item.get("abstract") and details.get("abstract"):
+                            serp_item["abstract"] = details.get("abstract")
+                            abstract = serp_item.get("abstract", "") or abstract
+                        if not serp_item.get("introduction") and details.get("tldr"):
+                            serp_item["introduction"] = details.get("tldr")
+                            introduction = serp_item.get("introduction", "") or introduction
+                        if not serp_item.get("pdf_url") and details.get("openAccessPdf"):
+                            oa = details.get("openAccessPdf") or {}
+                            if isinstance(oa, dict) and oa.get("url"):
+                                serp_item["pdf_url"] = oa.get("url")
+                        if not serp_item.get("pdf_url") and details.get("pdf_url"):
+                            serp_item["pdf_url"] = details.get("pdf_url")
+
             # Clean venue (arXiv-only papers will have empty venue after cleaning)
             venue_value = serp_item.get("venue", "")
             if venue_value and venue_value.strip():
@@ -2854,6 +2910,15 @@ def agent_execute_search(
         
         # Get LLM instance for scoring
         llm_instance = llm.get_llm("score", temperature=0.1, api_key=api_key)
+
+        # Score timeouts scale with batch size to avoid premature timeouts on multi-dim scoring.
+        import math
+        dimension_calls = 10  # 5 relevance + 5 quality
+        per_dim_timeout = 30
+        per_paper_timeout = max(240, per_dim_timeout * dimension_calls)
+        expected_batches = max(1, math.ceil(len(papers_to_score) / max_workers))
+        overall_timeout = max(600, per_paper_timeout * expected_batches * 2 + 60)
+        print(f"[agent.execute_search] Scoring timeouts: per_paper={per_paper_timeout}s, overall={overall_timeout}s")
         
         # Run scoring in parallel with timeout protection
         print(f"\n{'='*80}")
@@ -2883,12 +2948,11 @@ def agent_execute_search(
             error_count = 0
             try:
                 # Use as_completed with overall timeout to prevent infinite waiting
-                # Increased to 120s since we now only evaluate 5 Relevance dimensions (was 10 dimensions)
-                for future in as_completed(future_to_paper, timeout=120):  # 120 seconds overall timeout
+                for future in as_completed(future_to_paper, timeout=overall_timeout):
                     paper_info = future_to_paper[future]
                     try:
-                        # Add per-task timeout (30 seconds per paper scoring for 5 Relevance dimensions)
-                        result = future.result(timeout=30)  # Returns {"score": int, "explanation": str}
+                        # Add per-task timeout to avoid hung LLM calls
+                        result = future.result(timeout=per_paper_timeout)  # Returns {"score": int, "explanation": str}
                         score = result.get("score", 4)  # Default to 4 if missing
                         # Ensure score is within valid range (1-8) for PaperWithScore schema
                         if score < 1:
@@ -2989,7 +3053,7 @@ def agent_execute_search(
                         
             except TimeoutError:
                 # Overall timeout - some tasks didn't complete
-                print(f"\n[Scoring] Overall timeout reached (120s), processing remaining tasks...")
+                print(f"\n[Scoring] Overall timeout reached ({overall_timeout}s), processing remaining tasks...")
                 # Track which futures were already processed in the as_completed loop
                 processed_futures = {f for f in future_to_paper if f in {future for future in future_to_paper if future.done()}}
                 # Only count futures that weren't processed in the as_completed loop
@@ -3049,7 +3113,7 @@ def agent_execute_search(
                         future.cancel()
                         timeout_count += 1
                         paper_info["score"] = 4
-                        paper_info["explanation"] = "Overall timeout - assigned default score"
+                        paper_info["explanation"] = f"Overall timeout ({overall_timeout}s) - assigned default score"
                         # NOTE: Default score 4 is used when scoring completely fails
                         # If Relevance dimensions were partially scored, we would use that score instead
                         scored_results.append(paper_info)
@@ -3064,7 +3128,7 @@ def agent_execute_search(
                             introduction=paper_info.get("introduction") or "",  # Ensure not None
                             venue=overall_timeout_venue,
                             score=4,
-                            explanation="Overall timeout (120s)",
+                            explanation=f"Overall timeout ({overall_timeout}s)",
                             authors=paper_info.get("authors", []),  # Author list for calculating paper score
                             associated_candidates=[],
                             # Multi-dimensional scoring fields (overall timeout defaults)
@@ -3072,7 +3136,7 @@ def agent_execute_search(
                             quality_score=0.0,
                             relevance_dimensions={},
                             quality_dimensions={},
-                            relevance_explanation="Overall timeout (120s)"
+                            relevance_explanation=f"Overall timeout ({overall_timeout}s)"
                         )
                         if paper.url not in all_scored_papers:
                             all_scored_papers[paper.url] = paper
@@ -3647,6 +3711,7 @@ def agent_execute_search(
                     terms[current_term_idx]["exhausted"] = True
                 current_term_idx += 1
                 consecutive_empty_batches = 0  # 重置计数器
+                pending_term_idx = None
                 
                 if current_term_idx < len(terms):
                     next_variant = terms[current_term_idx]
@@ -3657,13 +3722,23 @@ def agent_execute_search(
                 else:
                     print(f"[Query Pool] 所有variants已用完")
             else:
-                # 第1批空，继续用同一query再来一批
-                print(f"[Query Pool] 继续使用当前query再获取10篇论文...")
+                # 第1批空，继续用同一query再来一批（除非本轮已标记切换）
+                if pending_term_idx is not None and pending_term_idx != current_term_idx:
+                    current_term_idx = pending_term_idx
+                    pending_term_idx = None
+                    next_variant = terms[current_term_idx]
+                    print(f"[Query Pool] 本轮已标记切换，改用Variant {current_term_idx}: {next_variant['keywords']} ({next_variant['name']})")
+                    print(f"[Query Pool] 立即开始下一轮搜索...")
+                else:
+                    print(f"[Query Pool] 继续使用当前query再获取10篇论文...")
                 continue
         else:
             # 有新的有效候选人，重置空批次计数
             consecutive_empty_batches = 0
             print(f"[Query Pool] 本批次新增{new_matching_candidates_in_batch}个有效候选人，累计{batch_matching_candidates_end}人")
+        if pending_term_idx is not None and pending_term_idx != current_term_idx:
+            current_term_idx = pending_term_idx
+        pending_term_idx = None
         # ==============================================================
         # ========== 额外处理：对高分论文（7、8分）的一作进行二次检查 ==========
         print("\n" + "="*80)
