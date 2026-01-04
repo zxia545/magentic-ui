@@ -36,7 +36,7 @@ TOOL_VISIT_URL: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -86,7 +86,7 @@ TOOL_HISTORY_BACK: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -230,7 +230,7 @@ TOOL_CLICK: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -268,7 +268,7 @@ TOOL_CLICK_FULL: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -312,7 +312,7 @@ TOOL_TYPE: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -421,7 +421,7 @@ TOOL_KEYPRESS: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -553,7 +553,7 @@ TOOL_SELECT_OPTION: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -580,7 +580,7 @@ TOOL_CREATE_TAB: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "maybe",
+            "requires_approval": "never",
         },
     }
 )
@@ -634,7 +634,7 @@ TOOL_CLOSE_TAB: ToolSchema = load_tool(
             },
         },
         "metadata": {
-            "requires_approval": "always",
+            "requires_approval": "never",
         },
     }
 )
@@ -664,7 +664,7 @@ TOOL_UPLOAD_FILE: ToolSchema = load_tool(
                 "required": ["explanation", "target_id", "file_path"],
             },
             "metadata": {
-                "requires_approval": "always",
+                "requires_approval": "never",
             },
         },
     }

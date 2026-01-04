@@ -90,6 +90,11 @@ def main(
             help="Launch the UI with the FARA-based web surfer agent instead of the default GPT-oriented surfer.",
         ),
     ] = False,
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug mode with verbose logging (default: False)",
+    ),
 ):
     """
     Magentic-UI: A human-centered interface for web agents.
@@ -116,6 +121,7 @@ def main(
             config=config,
             run_without_docker=run_without_docker,
             fara_agent=fara_agent,
+            debug=debug,
         )
 
 
@@ -131,6 +137,7 @@ def run_ui(
     config: Optional[str],
     run_without_docker: bool,
     fara_agent: bool,
+    debug: bool = False,
 ):
     """
     Core logic to run the Magentic-UI web application.
@@ -149,6 +156,75 @@ def run_ui(
         run_without_docker (bool, optional): Run without docker. This will remove coder and filesurfer agents and disale live browser view. Defaults to False.
         fara_agent (bool, optional): Use the FARA-based web surfer agent instead of the default GPT-oriented surfer. Defaults to False.
     """
+    # Configure logging based on debug flag
+    from loguru import logger
+    from datetime import datetime
+    import sys
+    import logging
+    
+    # InterceptHandler to redirect standard logging to loguru
+    class InterceptHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            # Get corresponding Loguru level if it exists
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+
+            # Find caller from where originated the logged message
+            frame, depth = sys._getframe(6), 6
+            while frame and frame.f_code.co_filename == logging.__file__:
+                frame = frame.f_back
+                depth += 1
+
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+    
+    # Create log directory
+    log_dir = os.path.join(appdir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create log file with timestamp
+    log_file = os.path.join(log_dir, f"magentic_ui_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    
+    # Remove default handler and add new ones with appropriate level
+    logger.remove()  # Remove default handler
+    
+    if debug:
+        # Terminal output with colors (DEBUG level)
+        logger.add(sys.stderr, level="DEBUG", format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+        # File output without colors (DEBUG level)
+        logger.add(log_file, level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", rotation="100 MB", retention="7 days")
+        typer.echo(typer.style("Debug mode enabled - verbose logging active", fg=typer.colors.YELLOW, bold=True))
+        typer.echo(typer.style(f"Logs will be saved to: {log_file}", fg=typer.colors.CYAN))
+    else:
+        # Terminal output with colors (INFO level)
+        logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+        # File output without colors (INFO level)
+        logger.add(log_file, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", rotation="100 MB", retention="7 days")
+        typer.echo(typer.style(f"Logs will be saved to: {log_file}", fg=typer.colors.CYAN))
+    
+    # Intercept standard logging and redirect to loguru
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    
+    # Configure specific loggers that we want to capture
+    loggers_to_intercept = [
+        "autogen_core",
+        "autogen_agentchat",
+        # "autogen_ext",
+        # "httpx",
+        # "openai",
+        # "uvicorn",
+        # "uvicorn.access",
+        # "uvicorn.error",
+        # "fastapi",
+    ]
+    
+    for logger_name in loggers_to_intercept:
+        logging_logger = logging.getLogger(logger_name)
+        logging_logger.handlers = [InterceptHandler()]
+        logging_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        logging_logger.propagate = False
+    
     # Display a green, bold "Starting Magentic-UI" message
     typer.echo(typer.style("Starting Magentic-UI", fg=typer.colors.GREEN, bold=True))
 
@@ -230,6 +306,7 @@ def run_ui(
     env_vars["INTERNAL_WORKSPACE_ROOT"] = appdir
     env_vars["RUN_WITHOUT_DOCKER"] = str(run_without_docker)
     env_vars["FARA_AGENT"] = str(fara_agent)
+    env_vars["_DEBUG"] = "1" if debug else "0"
 
     # Handle configuration file path
     if not config:
@@ -306,6 +383,7 @@ def ui(
         config=config,
         run_without_docker=run_without_docker,
         fara_agent=fara_agent,
+        debug=False,
     )
 
 

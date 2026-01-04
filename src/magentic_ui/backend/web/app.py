@@ -38,6 +38,81 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
 
     try:
+        # Configure logging based on debug environment variable
+        import sys
+        from datetime import datetime
+        from pathlib import Path
+        import logging
+        
+        # InterceptHandler to redirect standard logging to loguru
+        class InterceptHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                # Get corresponding Loguru level if it exists
+                try:
+                    level = logger.level(record.levelname).name
+                except ValueError:
+                    level = record.levelno
+
+                # Find caller from where originated the logged message
+                frame, depth = sys._getframe(6), 6
+                while frame and frame.f_code.co_filename == logging.__file__:
+                    frame = frame.f_back
+                    depth += 1
+
+                logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        
+        debug_mode = os.environ.get("_DEBUG") == "1"
+        appdir = os.environ.get("_APPDIR", str(Path.home() / ".magentic_ui"))
+        
+        # Create log directory
+        log_dir = os.path.join(appdir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Create log file with timestamp
+        log_file = os.path.join(log_dir, f"magentic_ui_web_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        
+        # Remove default handler and add new ones with appropriate level
+        logger.remove()  # Remove default handler
+        
+        if debug_mode:
+            # Terminal output with colors (DEBUG level)
+            logger.add(sys.stderr, level="DEBUG", format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+            # File output without colors (DEBUG level)
+            logger.add(log_file, level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", rotation="100 MB", retention="7 days")
+            logger.info(f"Debug mode enabled for Web application - Logs saved to: {log_file}")
+        else:
+            # Terminal output with colors (INFO level)
+            logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+            # File output without colors (INFO level)
+            logger.add(log_file, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", rotation="100 MB", retention="7 days")
+            logger.info(f"Logs saved to: {log_file}")
+        
+        # Intercept standard logging and redirect to loguru
+        logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+        
+        # Configure specific loggers that we want to capture
+        loggers_to_intercept = [
+            "autogen_core",
+            "autogen_agentchat", 
+            # "autogen_ext",
+            # "httpx",
+            # "openai",
+            # "uvicorn",
+            # "uvicorn.access",
+            # "uvicorn.error",
+            # "fastapi",
+        ]
+        
+        for logger_name in loggers_to_intercept:
+            logging_logger = logging.getLogger(logger_name)
+            logging_logger.handlers = [InterceptHandler()]
+            logging_logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+            logging_logger.propagate = False
+        
+        # # Set up dedicated autogen message logger
+        # from ..utils.log_formatter import setup_autogen_message_logger
+        # setup_autogen_message_logger(log_file, debug_mode)
+        
         # Load the config if provided
         config: dict[str, Any] = {}
         config_file = os.environ.get("_CONFIG")
@@ -45,6 +120,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info(f"Loading config from file: {config_file}")
             with open(config_file, "r") as f:
                 config = yaml.safe_load(f)
+            if debug_mode:
+                logger.debug(f"Config loaded: {config}")
         else:
             logger.info("No config file provided, using defaults.")
 
